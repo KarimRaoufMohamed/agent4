@@ -16,6 +16,9 @@ urlpatterns = [
     path('workflows/instances/<str:instance_id>/steps/<str:step_id>/submit/', views.submit_step_data, name='submit_step_data'),
     path('check_user_exists/<str:email>', views.check_user_exists, name='check_user_exists'),
 
+    # Onboarding Endpoints
+    path('onboarding/create-agents/', views.create_agents_from_onboarding, name='create_agents_from_onboarding'),
+    path('agents/by-email/', views.get_agents_by_email, name='get_agents_by_email'),
 
          path('users/', users_view),
     path('users/<int:id>/', users_view),
