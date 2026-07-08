@@ -1,0 +1,21 @@
+{
+    "screens": [
+      {
+        "screen_title": "Welcome",
+        "screen_name": "welcome",
+        "showInSidebar": false,
+
+        "icon": "BarChart",
+        "components": [
+            {
+                "file_name": "welcome",
+                "api_url": "/app/userCreated",
+                "title":"Signed in successfully!",
+                "redirect_link": "/"
+              }
+        ]
+      }
+     
+    ]
+  }
+  

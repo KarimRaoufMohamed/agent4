@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./django
+      dockerfile: Dockerfile
+      args:
+        app_migrations: true
+        create_superuser: true
+    ports:
+      - "8000:8000"
+    volumes:
+      - sqlite_data_iVx874AJc8hL:/app/project/database
+    environment:
+      - CREATE_SUPERUSER=true
+      - RUN_REPORTS=true
+      - RUN_ROLES=true
+      - DJANGO_SUPERUSER_USERNAME=admin
+      - DJANGO_SUPERUSER_EMAIL=admin@example.com
+      - DJANGO_SUPERUSER_PASSWORD=iVx874AJc8hL
+    networks:
+      - app-network
+
+  frontend:
+    build:
+      context: ./nextjs
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    networks:
+      - app-network
+    depends_on:
+      - backend
+
+volumes:
+  sqlite_data_iVx874AJc8hL:
+
+networks:
+  app-network:

@@ -1,0 +1,9 @@
+{
+"servers": {
+    "digitizeit-mcp": {
+    "type": "https",
+    "url": "https://www.business-expert.ai/api/mcp"
+    }
+},
+"inputs": []
+}

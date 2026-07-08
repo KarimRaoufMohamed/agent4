@@ -1,0 +1,366 @@
+name: Cloud Run PR Preview
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GCP_REGION: ${{ secrets.GCP_REGION }}
+  GCP_ARTIFACT_REGISTRY_REPOSITORY: ${{ secrets.GCP_ARTIFACT_REGISTRY_REPOSITORY }}
+
+jobs:
+  check-gcp-config:
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        env:
+          WIF: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          SA: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+        run: |
+          if [ -n "$WIF" ] && [ -n "$SA" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy-production:
+    needs: check-gcp-config
+    if: >
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.check-gcp-config.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT_EMAIL: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Prepare names and image paths
+        id: prep
+        run: |
+          set -euo pipefail
+          REPO_SLUG="$(echo "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-')"
+          REPO_SLUG="${REPO_SLUG#-}"
+          REPO_SLUG="${REPO_SLUG%-}"
+
+          BACKEND_SERVICE="$(echo "${REPO_SLUG}-backend" | cut -c1-63 | sed 's/-$//')"
+          FRONTEND_SERVICE="$(echo "${REPO_SLUG}-frontend" | cut -c1-63 | sed 's/-$//')"
+          REGISTRY_HOST="${GCP_REGION}-docker.pkg.dev"
+          IMAGE_BASE="${REGISTRY_HOST}/${GCP_PROJECT_ID}/${GCP_ARTIFACT_REGISTRY_REPOSITORY}"
+
+          echo "backend_service=${BACKEND_SERVICE}" >> "${GITHUB_OUTPUT}"
+          echo "frontend_service=${FRONTEND_SERVICE}" >> "${GITHUB_OUTPUT}"
+          echo "backend_image=${IMAGE_BASE}/${BACKEND_SERVICE}:${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "frontend_image=${IMAGE_BASE}/${FRONTEND_SERVICE}:${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "registry_host=${REGISTRY_HOST}" >> "${GITHUB_OUTPUT}"
+
+      - name: Ensure Artifact Registry repository exists
+        run: |
+          set -euo pipefail
+          gcloud artifacts repositories describe "${GCP_ARTIFACT_REGISTRY_REPOSITORY}" \
+            --location "${GCP_REGION}" \
+            --project "${GCP_PROJECT_ID}" >/dev/null 2>&1 || \
+          gcloud artifacts repositories create "${GCP_ARTIFACT_REGISTRY_REPOSITORY}" \
+            --repository-format docker \
+            --location "${GCP_REGION}" \
+            --project "${GCP_PROJECT_ID}"
+
+      - name: Configure Docker auth for Artifact Registry
+        run: gcloud auth configure-docker "${{ steps.prep.outputs.registry_host }}" --quiet
+
+      - name: Build and push backend image
+        run: |
+          set -euo pipefail
+          docker build -t "${{ steps.prep.outputs.backend_image }}" ./django
+          docker push "${{ steps.prep.outputs.backend_image }}"
+
+      - name: Deploy backend to production
+        run: |
+          set -euo pipefail
+          gcloud run deploy "${{ steps.prep.outputs.backend_service }}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --platform managed \
+            --no-invoker-iam-check \
+            --port 8000 \
+            --image "${{ steps.prep.outputs.backend_image }}"
+
+      - name: Get backend URL
+        id: backend-url
+        run: |
+          set -euo pipefail
+          BACKEND_URL="$(gcloud run services describe "${{ steps.prep.outputs.backend_service }}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --format='value(status.url)')"
+          echo "value=${BACKEND_URL}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push frontend image
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY="${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY }}" \
+            -t "${{ steps.prep.outputs.frontend_image }}" ./nextjs
+          docker push "${{ steps.prep.outputs.frontend_image }}"
+
+      - name: Deploy frontend to production
+        run: |
+          set -euo pipefail
+          gcloud run deploy "${{ steps.prep.outputs.frontend_service }}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --platform managed \
+            --no-invoker-iam-check \
+            --port 3000 \
+            --set-env-vars "API_URL=${{ steps.backend-url.outputs.value }}" \
+            --set-env-vars "CLERK_SECRET_KEY=${{ secrets.CLERK_SECRET_KEY }}" \
+            --set-env-vars "CLERK_WEBHOOK_SIGNING_SECRET=${{ secrets.CLERK_WEBHOOK_SIGNING_SECRET }}" \
+            --set-env-vars "NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in" \
+            --set-env-vars "NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up" \
+            --image "${{ steps.prep.outputs.frontend_image }}"
+
+      - name: Get frontend URL
+        id: frontend-url
+        run: |
+          set -euo pipefail
+          FRONTEND_URL="$(gcloud run services describe "${{ steps.prep.outputs.frontend_service }}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --format='value(status.url)')"
+          echo "value=${FRONTEND_URL}" >> "${GITHUB_OUTPUT}"
+
+      - name: Write production URLs to job summary
+        run: |
+          echo "## 🚀 Production Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Frontend:** ${{ steps.frontend-url.outputs.value }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Backend:** ${{ steps.backend-url.outputs.value }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Deployed from commit \`${GITHUB_SHA:0:7}\` on branch \`main\`." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post production URLs as commit comment
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body: [
+                "### ✅ Production deployment live",
+                "",
+                `- Frontend: ${{ steps.frontend-url.outputs.value }}`,
+                `- Backend: ${{ steps.backend-url.outputs.value }}`,
+                "",
+                `Deployed from commit \`${context.sha.substring(0, 7)}\` on branch \`main\`.`,
+              ].join("\n"),
+            });
+
+  deploy-preview:
+    needs: check-gcp-config
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.action != 'closed' &&
+      needs.check-gcp-config.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT_EMAIL: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+    concurrency:
+      group: cloud-run-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Prepare names and image paths
+        id: prep
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO_SLUG="$(echo "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-')"
+          REPO_SLUG="${REPO_SLUG#-}"
+          REPO_SLUG="${REPO_SLUG%-}"
+
+          BACKEND_SERVICE="$(echo "${REPO_SLUG}-backend-pr-${PR_NUMBER}" | cut -c1-63 | sed 's/-$//')"
+          FRONTEND_SERVICE="$(echo "${REPO_SLUG}-frontend-pr-${PR_NUMBER}" | cut -c1-63 | sed 's/-$//')"
+          REGISTRY_HOST="${GCP_REGION}-docker.pkg.dev"
+          IMAGE_BASE="${REGISTRY_HOST}/${GCP_PROJECT_ID}/${GCP_ARTIFACT_REGISTRY_REPOSITORY}"
+
+          echo "backend_service=${BACKEND_SERVICE}" >> "${GITHUB_OUTPUT}"
+          echo "frontend_service=${FRONTEND_SERVICE}" >> "${GITHUB_OUTPUT}"
+          echo "backend_image=${IMAGE_BASE}/${BACKEND_SERVICE}:${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "frontend_image=${IMAGE_BASE}/${FRONTEND_SERVICE}:${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "registry_host=${REGISTRY_HOST}" >> "${GITHUB_OUTPUT}"
+
+      - name: Ensure Artifact Registry repository exists
+        run: |
+          set -euo pipefail
+          gcloud artifacts repositories describe "${GCP_ARTIFACT_REGISTRY_REPOSITORY}" \
+            --location "${GCP_REGION}" \
+            --project "${GCP_PROJECT_ID}" >/dev/null 2>&1 || \
+          gcloud artifacts repositories create "${GCP_ARTIFACT_REGISTRY_REPOSITORY}" \
+            --repository-format docker \
+            --location "${GCP_REGION}" \
+            --project "${GCP_PROJECT_ID}"
+
+      - name: Configure Docker auth for Artifact Registry
+        run: gcloud auth configure-docker "${{ steps.prep.outputs.registry_host }}" --quiet
+
+      - name: Build and push backend image
+        run: |
+          set -euo pipefail
+          docker build -t "${{ steps.prep.outputs.backend_image }}" ./django
+          docker push "${{ steps.prep.outputs.backend_image }}"
+
+      - name: Deploy backend preview service
+        run: |
+          set -euo pipefail
+          gcloud run deploy "${{ steps.prep.outputs.backend_service }}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --platform managed \
+            --no-invoker-iam-check \
+            --port 8000 \
+            --image "${{ steps.prep.outputs.backend_image }}"
+
+      - name: Get backend URL
+        id: backend-url
+        run: |
+          set -euo pipefail
+          BACKEND_URL="$(gcloud run services describe "${{ steps.prep.outputs.backend_service }}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --format='value(status.url)')"
+          echo "value=${BACKEND_URL}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push frontend image
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY="${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY }}" \
+            -t "${{ steps.prep.outputs.frontend_image }}" ./nextjs
+          docker push "${{ steps.prep.outputs.frontend_image }}"
+
+      - name: Deploy frontend preview service
+        run: |
+          set -euo pipefail
+          gcloud run deploy "${{ steps.prep.outputs.frontend_service }}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --platform managed \
+            --no-invoker-iam-check \
+            --port 3000 \
+            --set-env-vars "API_URL=${{ steps.backend-url.outputs.value }}" \
+            --set-env-vars "CLERK_SECRET_KEY=${{ secrets.CLERK_SECRET_KEY }}" \
+            --set-env-vars "CLERK_WEBHOOK_SIGNING_SECRET=${{ secrets.CLERK_WEBHOOK_SIGNING_SECRET }}" \
+            --set-env-vars "NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in" \
+            --set-env-vars "NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up" \
+            --image "${{ steps.prep.outputs.frontend_image }}"
+
+      - name: Get frontend URL
+        id: frontend-url
+        run: |
+          set -euo pipefail
+          FRONTEND_URL="$(gcloud run services describe "${{ steps.prep.outputs.frontend_service }}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --format='value(status.url)')"
+          echo "value=${FRONTEND_URL}" >> "${GITHUB_OUTPUT}"
+
+      - name: Comment preview URLs on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = [
+              "### ✅ Cloud Run preview environment updated",
+              "",
+              `- Frontend: ${{ steps.frontend-url.outputs.value }}`,
+              `- Backend: ${{ steps.backend-url.outputs.value }}`,
+              "",
+              `PR #${context.payload.pull_request.number} services were deployed from commit \`${context.sha.substring(0, 7)}\`.`,
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body,
+            });
+
+  cleanup-preview:
+    needs: check-gcp-config
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      needs.check-gcp-config.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT_EMAIL: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Delete preview services
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO_SLUG="$(echo "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-')"
+          REPO_SLUG="${REPO_SLUG#-}"
+          REPO_SLUG="${REPO_SLUG%-}"
+
+          BACKEND_SERVICE="$(echo "${REPO_SLUG}-backend-pr-${PR_NUMBER}" | cut -c1-63 | sed 's/-$//')"
+          FRONTEND_SERVICE="$(echo "${REPO_SLUG}-frontend-pr-${PR_NUMBER}" | cut -c1-63 | sed 's/-$//')"
+
+          gcloud run services delete "${BACKEND_SERVICE}" --project "${GCP_PROJECT_ID}" --region "${GCP_REGION}" --quiet || true
+          gcloud run services delete "${FRONTEND_SERVICE}" --project "${GCP_PROJECT_ID}" --region "${GCP_REGION}" --quiet || true
