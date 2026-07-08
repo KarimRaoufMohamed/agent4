@@ -13,7 +13,10 @@ interface NavLink {
   adminOnly?: boolean;
 }
 
-const navLinks: NavLink[] = [];
+const navLinks: NavLink[] = [
+  { href: "/ai-team", label: "AI Team" },
+  { href: "/onboarding", label: "Get Started" },
+];
 
 export function Header() {
   const pathname = usePathname();

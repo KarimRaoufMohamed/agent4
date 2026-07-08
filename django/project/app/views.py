@@ -569,6 +569,122 @@ def user_created(request):
         }, status=500)
 
 
+@api_view(['POST'])
+@csrf_exempt
+def create_agents_from_onboarding(request):
+    """
+    Create AI agents from onboarding wizard data.
+    Expected JSON payload:
+    {
+        "user_email": "user@example.com",
+        "work_description": "Business description...",
+        "capabilities": ["Invoicing", "Expense tracking"],
+        "agents": [
+            {"name": "Accountant Agent", "description": "..."},
+            ...
+        ]
+    }
+    """
+    try:
+        data = json.loads(request.body) if request.body else {}
+
+        user_email = data.get('user_email')
+        work_description = data.get('work_description', '')
+        agents_data = data.get('agents', [])
+
+        if not user_email:
+            return JsonResponse({'error': 'user_email is required'}, status=400)
+
+        if not agents_data:
+            return JsonResponse({'error': 'agents list is required'}, status=400)
+
+        if len(agents_data) > 50:
+            return JsonResponse({'error': 'Too many agents. Maximum 50 agents allowed per request'}, status=400)
+
+        # Get or create the custom Users record
+        user, _ = Users.objects.get_or_create(
+            email=user_email,
+            defaults={'password': ''}
+        )
+
+        created_agents = []
+        for agent_data in agents_data:
+            name = agent_data.get('name', '').strip()
+            description = agent_data.get('description', '').strip()
+            if not name:
+                continue
+            if len(name) > 255:
+                return JsonResponse({'error': f'Agent name "{name[:30]}..." exceeds maximum length of 255 characters'}, status=400)
+            agent = AI_Agents.objects.create(
+                user=user,
+                name=name,
+                description=description,
+                status='Needs Setup',
+            )
+            created_agents.append({
+                'agent_id': agent.agent_id,
+                'name': agent.name,
+                'description': agent.description,
+                'status': agent.status,
+                'task_count': agent.task_count,
+                'tool_count': agent.tool_count,
+            })
+
+        return JsonResponse({
+            'success': True,
+            'message': 'Agents created successfully',
+            'data': {
+                'agents': created_agents,
+                'count': len(created_agents),
+                'work_description': work_description,
+            }
+        }, status=201)
+
+    except Exception as e:
+        print(f"❌ Error in create_agents_from_onboarding: {str(e)}")
+        return JsonResponse({'error': 'An error occurred while creating agents'}, status=500)
+
+
+@api_view(['GET'])
+@csrf_exempt
+def get_agents_by_email(request):
+    """Get all AI agents for a specific user identified by email."""
+    try:
+        user_email = request.GET.get('user_email')
+        if not user_email:
+            return JsonResponse({'error': 'user_email parameter is required'}, status=400)
+
+        user_email = unquote(user_email)
+
+        try:
+            user = Users.objects.get(email=user_email)
+            agents = AI_Agents.objects.filter(user=user).order_by('agent_id')
+            agents_data = [
+                {
+                    'agent_id': agent.agent_id,
+                    'name': agent.name,
+                    'description': agent.description,
+                    'status': agent.status,
+                    'task_count': agent.task_count,
+                    'tool_count': agent.tool_count,
+                    'last_active': agent.last_active.isoformat() if agent.last_active else None,
+                }
+                for agent in agents
+            ]
+        except Users.DoesNotExist:
+            agents_data = []
+
+        return JsonResponse({
+            'success': True,
+            'data': agents_data,
+            'count': len(agents_data),
+        }, status=200)
+
+    except Exception as e:
+        print(f"❌ Error in get_agents_by_email: {str(e)}")
+        return JsonResponse({'error': 'An error occurred while fetching agents'}, status=500)
+
+
 @api_view(['GET'])
 def check_user_exists(request, email):
     try:

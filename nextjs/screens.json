@@ -11,7 +11,7 @@
                 "file_name": "welcome",
                 "api_url": "/app/userCreated",
                 "title":"Signed in successfully!",
-                "redirect_link": "/"
+                "redirect_link": "/onboarding"
               }
         ]
       }
