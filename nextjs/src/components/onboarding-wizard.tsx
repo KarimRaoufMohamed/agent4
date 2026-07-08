@@ -32,7 +32,7 @@ const PREDEFINED_AGENTS = [
     description: "Handles day-to-day operations and scheduling",
   },
   {
-    name: "Sales Agent",
+    name: "AI Sales Assistant",
     description: "Manages sales outreach and customer acquisition",
   },
   {
@@ -163,6 +163,32 @@ export default function OnboardingWizard() {
   };
 
   const handleCreateAgents = async () => {
+    // Include any pending custom form data
+    const pendingAgent =
+      showCustomForm && customAgentName.trim()
+        ? {
+            name: customAgentName.trim(),
+            description: customAgentDescription.trim(),
+          }
+        : null;
+
+    const allCustomAgents = pendingAgent
+      ? [...customAgents, pendingAgent]
+      : customAgents;
+
+    // Validate for duplicate names (case-insensitive)
+    const seenNames = new Set(
+      selectedAgents.map((n) => n.toLowerCase())
+    );
+    for (const agent of allCustomAgents) {
+      const normalized = agent.name.toLowerCase();
+      if (seenNames.has(normalized)) {
+        setSubmitError("Role name already exists. Choose a unique name.");
+        return;
+      }
+      seenNames.add(normalized);
+    }
+
     setIsLoading(true);
     setSubmitError(null);
 
@@ -170,7 +196,7 @@ export default function OnboardingWizard() {
       ...PREDEFINED_AGENTS.filter((a) => selectedAgents.includes(a.name)).map(
         (a) => ({ name: a.name, description: a.description })
       ),
-      ...customAgents.map((a) => ({
+      ...allCustomAgents.map((a) => ({
         name: a.name,
         description: a.description,
       })),
@@ -195,6 +221,9 @@ export default function OnboardingWizard() {
       }
 
       setCreatedAgents(data.data?.agents ?? []);
+      setShowCustomForm(false);
+      setCustomAgentName("");
+      setCustomAgentDescription("");
       setStep(4);
     } catch (err) {
       setSubmitError(
@@ -414,7 +443,9 @@ export default function OnboardingWizard() {
                 className="flex-1"
                 disabled={
                   isLoading ||
-                  (selectedAgents.length === 0 && customAgents.length === 0)
+                  (selectedAgents.length === 0 &&
+                    customAgents.length === 0 &&
+                    !(showCustomForm && customAgentName.trim()))
                 }
               >
                 {isLoading ? "Creating…" : "Create your Agents"}
