@@ -7,7 +7,10 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { Check, Plus, Settings } from "lucide-react";
+import { Check, Plus, Settings, Sparkles, Wand2 } from "lucide-react";
+
+const AI_DRAFT_DESCRIPTION =
+  "Acme Plumbing Services specializes in residential plumbing, billing, and monthly financial reporting.";
 
 const CAPABILITIES = [
   "Invoicing",
@@ -21,6 +24,19 @@ const CAPABILITIES = [
   "Inventory management",
   "Contract management",
 ];
+
+const CAPABILITY_KEYWORDS: Record<string, string[]> = {
+  Invoicing: ["invoic", "billing", "bill", "invoice"],
+  "Expense tracking": ["expense", "cost", "spend"],
+  Reporting: ["report", "financial report", "analytics"],
+  "Client follow-up": ["client follow", "follow-up", "follow up", "customer follow"],
+  Scheduling: ["schedul", "calendar", "appointment", "emergency response", "24/7"],
+  "Customer support": ["support", "customer service", "helpdesk", "emergency"],
+  "Sales outreach": ["sales", "outreach", "acquisition"],
+  "HR & payroll": ["hr", "payroll", "employee", "hiring", "onboard"],
+  "Inventory management": ["inventor", "stock", "warehouse"],
+  "Contract management": ["contract", "agreement", "legal"],
+};
 
 const PREDEFINED_AGENTS = [
   {
@@ -109,9 +125,13 @@ export default function OnboardingWizard() {
   // Step 1
   const [workDescription, setWorkDescription] = useState("");
   const [step1Error, setStep1Error] = useState("");
+  const [isGeneratingDraft, setIsGeneratingDraft] = useState(false);
 
   // Step 2
   const [selectedCapabilities, setSelectedCapabilities] = useState<string[]>(
+    []
+  );
+  const [suggestedCapabilities, setSuggestedCapabilities] = useState<string[]>(
     []
   );
 
@@ -159,7 +179,29 @@ export default function OnboardingWizard() {
       return;
     }
     setStep1Error("");
+    // Compute suggestions for step 2 based on current description
+    const lower = workDescription.toLowerCase();
+    const suggestions = CAPABILITIES.filter((cap) =>
+      (CAPABILITY_KEYWORDS[cap] ?? []).some((kw) => lower.includes(kw))
+    );
+    setSuggestedCapabilities(suggestions);
     setStep(2);
+  };
+
+  const handleAiAssist = () => {
+    setIsGeneratingDraft(true);
+    // Simulate a brief async generation delay, then fill in the draft
+    setTimeout(() => {
+      setWorkDescription(AI_DRAFT_DESCRIPTION);
+      setIsGeneratingDraft(false);
+    }, 600);
+  };
+
+  const handleSuggestCapabilities = () => {
+    setSelectedCapabilities((prev) => {
+      const merged = new Set([...prev, ...suggestedCapabilities]);
+      return Array.from(merged);
+    });
   };
 
   const handleCreateAgents = async () => {
@@ -253,9 +295,20 @@ export default function OnboardingWizard() {
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium">
-                Describe your business and what you need help with
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium">
+                  Describe your business and what you need help with
+                </label>
+                <button
+                  type="button"
+                  onClick={handleAiAssist}
+                  disabled={isGeneratingDraft}
+                  className="flex items-center gap-1.5 text-xs text-primary hover:text-primary/80 transition-colors disabled:opacity-50"
+                >
+                  <Wand2 className="w-3.5 h-3.5" />
+                  {isGeneratingDraft ? "Generating…" : "Help me write this"}
+                </button>
+              </div>
               <Textarea
                 placeholder="e.g. Acme Plumbing Services: residential plumbing, invoicing, and monthly reporting"
                 value={workDescription}
@@ -284,6 +337,27 @@ export default function OnboardingWizard() {
                 Select the capabilities you want your AI team to have
               </p>
             </div>
+
+            {suggestedCapabilities.length > 0 && (
+              <div className="flex items-center justify-between rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
+                <div className="flex items-center gap-2 text-primary">
+                  <Sparkles className="w-4 h-4 shrink-0" />
+                  <span>
+                    AI suggestions based on your description:{" "}
+                    <span className="font-medium">
+                      {suggestedCapabilities.join(", ")}
+                    </span>
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSuggestCapabilities}
+                  className="ml-4 shrink-0 text-primary underline underline-offset-2 hover:text-primary/80 transition-colors"
+                >
+                  Suggest for me
+                </button>
+              </div>
+            )}
 
             <div className="flex flex-wrap gap-3">
               {CAPABILITIES.map((cap) => (
