@@ -34,7 +34,7 @@ const CAPABILITY_KEYWORDS: Record<string, string[]> = {
   "Customer support": ["support", "customer service", "helpdesk", "emergency"],
   "Sales outreach": ["sales", "outreach", "acquisition"],
   "HR & payroll": ["hr", "payroll", "employee", "hiring", "onboard"],
-  "Inventory management": ["inventor", "stock", "warehouse"],
+  "Inventory management": ["inventory", "stock", "warehouse"],
   "Contract management": ["contract", "agreement", "legal"],
 };
 
